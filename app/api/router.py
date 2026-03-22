@@ -10,6 +10,7 @@ from app.api.v1.sites import router as sites_router
 from app.api.v1.supervisor import router as supervisor_router
 from app.api.v1.tasks import router as tasks_router
 from app.api.v1.tenants import router as tenants_router
+from app.api.v1.workforce import router as workforce_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router)
@@ -22,3 +23,4 @@ api_router.include_router(expenses_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(contractor_router)
 api_router.include_router(supervisor_router)
+api_router.include_router(workforce_router)

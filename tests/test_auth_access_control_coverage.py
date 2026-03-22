@@ -299,7 +299,13 @@ def test_access_control_service_flows(monkeypatch) -> None:
 
     monkeypatch.setattr(access_control_service.repo, 'create_worker', AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(access_control_service, 'require_permission', AsyncMock())
-    worker_id = _run(access_control_service.create_worker(db, sup_actor, WorkerCreateRequest(site_id=uuid4(), name='WW', phone='99999999')))
+    worker_id = _run(
+        access_control_service.create_worker(
+            db,
+            sup_actor,
+            WorkerCreateRequest(site_id=uuid4(), name='WW', salary_type='daily', daily_wage='500', phone='99999999'),
+        )
+    )
     assert isinstance(worker_id, UUID)
 
     monkeypatch.setattr(access_control_service.repo, 'list_supervisors', AsyncMock(return_value=[{'id': uuid4(), 'name': 'S'}]))
@@ -455,21 +461,30 @@ def test_api_endpoints_direct_for_new_auth_and_role_modules(monkeypatch) -> None
     assert _run(contractor_api.assign_supervisor_site_endpoint(uid, uuid4(), actor, db)) == {'message': 'Assigned'}
 
     monkeypatch.setattr(supervisor_api, 'create_worker', AsyncMock(return_value=uid))
-    assert _run(supervisor_api.create_worker_endpoint(WorkerCreateRequest(site_id=uuid4(), name='WW', phone='99999999'), actor, db)) == {'id': str(uid)}
+    assert (
+        _run(
+            supervisor_api.create_worker_endpoint(
+                WorkerCreateRequest(site_id=uuid4(), name='WW', salary_type='daily', daily_wage='500', phone='99999999'),
+                actor,
+                db,
+            )
+        )
+        == {'id': str(uid)}
+    )
 
 
 def test_tenants_service_integrity_error_reraise(monkeypatch) -> None:
     db = object()
     payload = SubscriptionCreateRequest(
         tenant_id=uuid4(),
-        billing_cycle=BillingCycle.MONTHLY,
-        status=SubscriptionStatus.ACTIVE,
-        period_start=datetime.now(timezone.utc),
-        period_end=datetime.now(timezone.utc) + timedelta(days=1),
-        trial_end=None,
+        plan_name='STARTER',
+        start_date=datetime.now(timezone.utc).date(),
+        end_date=(datetime.now(timezone.utc) + timedelta(days=1)).date(),
+        is_active=True,
+        extra_sites_count=0,
     )
-    monkeypatch.setattr(tenants_service.repo, 'fetch_active_core_plan_id', AsyncMock(return_value=uuid4()))
+    monkeypatch.setattr(tenants_service.repo, 'plan_exists', AsyncMock(return_value=True))
     err = IntegrityError('stmt', {}, Exception('other_constraint'))
-    monkeypatch.setattr(tenants_service.repo, 'insert_subscription', AsyncMock(side_effect=err))
+    monkeypatch.setattr(tenants_service.repo, 'upsert_subscription', AsyncMock(side_effect=err))
     with pytest.raises(IntegrityError):
         _run(tenants_service.create_subscription(db, payload))

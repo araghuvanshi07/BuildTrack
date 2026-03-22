@@ -7,6 +7,7 @@ from app.api.v1.schemas import SiteCreateRequest, SiteUpdateRequest, UserContext
 from app.repositories import access_control as access_repo
 from app.repositories import sites as repo
 from app.services.access_control_service import require_permission
+from app.services.tenants_service import ensure_site_creation_allowed
 from app.utils.payloads import to_db_payload
 from app.utils.tenancy import set_tenant_search_path
 
@@ -21,6 +22,8 @@ async def create_site(db: AsyncSession, actor: UserContext | str, payload: SiteC
     actor = _as_actor(actor)
     await require_permission(db, actor, 'create_site')
     await set_tenant_search_path(db, actor.schema_name)
+    if actor.tenant_id.int != 0:
+        await ensure_site_creation_allowed(db, actor.tenant_id)
     body = to_db_payload(payload, uuid_fields={'project_id', 'supervisor_id'}, enum_fields={'status'})
     return await repo.create_site(db, body)
 

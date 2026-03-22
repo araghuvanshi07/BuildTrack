@@ -6,7 +6,7 @@ from app.core.dependencies import get_current_user
 from app.db.session import get_db
 from app.services.access_control_service import create_worker
 
-router = APIRouter(tags=['supervisor'])
+router = APIRouter(prefix='/supervisor', tags=['supervisor'])
 
 
 @router.post('/workers')

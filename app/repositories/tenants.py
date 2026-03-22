@@ -1,15 +1,8 @@
-from datetime import datetime
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.enums import BillingCycle, SubscriptionStatus
-
-
-async def fetch_active_core_plan_id(db: AsyncSession) -> UUID | None:
-    result = await db.execute(text("select id from public.plans where code='buildtrack_core' and is_active=true limit 1"))
-    return result.scalar_one_or_none()
 
 
 async def insert_tenant(db: AsyncSession, name: str, schema_name: str) -> dict:
@@ -26,77 +19,202 @@ async def insert_tenant(db: AsyncSession, name: str, schema_name: str) -> dict:
     return dict(result.mappings().one())
 
 
-async def insert_default_active_subscription(
-    db: AsyncSession,
-    tenant_id: UUID,
-    plan_id: UUID,
-    billing_cycle: BillingCycle,
-) -> None:
-    months = '1 month' if billing_cycle == BillingCycle.MONTHLY else '1 year'
-    await db.execute(
+async def create_trial_subscription(db: AsyncSession, tenant_id: UUID, trial_days: int) -> UUID:
+    result = await db.execute(
         text(
-            f"""
+            """
             insert into public.tenant_subscriptions (
-                tenant_id, plan_id, billing_cycle, status, period_start, period_end
-            ) values (
-                :tenant_id, :plan_id, :billing_cycle, 'ACTIVE', now(), now() + interval '{months}'
+              tenant_id,
+              plan_name,
+              start_date,
+              end_date,
+              is_active,
+              extra_sites_count,
+              trial_start_date,
+              trial_end_date,
+              is_trial_active
             )
+            values (
+              :tenant_id,
+              null,
+              null,
+              null,
+              false,
+              0,
+              current_date,
+              current_date + make_interval(days => :trial_days),
+              true
+            )
+            returning id
             """
         ),
-        {
-            'tenant_id': str(tenant_id),
-            'plan_id': str(plan_id),
-            'billing_cycle': billing_cycle.value,
-        },
+        {'tenant_id': str(tenant_id), 'trial_days': trial_days},
     )
+    return result.scalar_one()
 
 
-async def insert_subscription(
+async def upsert_subscription(
     db: AsyncSession,
     tenant_id: UUID,
-    plan_id: UUID,
-    billing_cycle: BillingCycle,
-    status: SubscriptionStatus,
-    period_start: datetime,
-    period_end: datetime,
-    trial_end: datetime | None,
+    plan_name: str,
+    start_date: date,
+    end_date: date,
+    is_active: bool,
+    extra_sites_count: int,
 ) -> UUID:
     result = await db.execute(
         text(
             """
             insert into public.tenant_subscriptions (
-              tenant_id, plan_id, billing_cycle, status, period_start, period_end, trial_end
-            ) values (
-              :tenant_id, :plan_id, :billing_cycle, :status, :period_start, :period_end, :trial_end
+              tenant_id,
+              plan_name,
+              start_date,
+              end_date,
+              is_active,
+              extra_sites_count,
+              trial_start_date,
+              trial_end_date,
+              is_trial_active
             )
+            values (
+              :tenant_id,
+              :plan_name,
+              :start_date,
+              :end_date,
+              :is_active,
+              :extra_sites_count,
+              current_date,
+              current_date,
+              false
+            )
+            on conflict (tenant_id)
+            do update set
+              plan_name=excluded.plan_name,
+              start_date=excluded.start_date,
+              end_date=excluded.end_date,
+              is_active=excluded.is_active,
+              extra_sites_count=excluded.extra_sites_count,
+              is_trial_active=false,
+              updated_at=now()
             returning id
             """
         ),
         {
             'tenant_id': str(tenant_id),
-            'plan_id': str(plan_id),
-            'billing_cycle': billing_cycle.value,
-            'status': status.value,
-            'period_start': period_start,
-            'period_end': period_end,
-            'trial_end': trial_end,
+            'plan_name': plan_name,
+            'start_date': start_date,
+            'end_date': end_date,
+            'is_active': is_active,
+            'extra_sites_count': extra_sites_count,
         },
     )
     return result.scalar_one()
 
 
-async def fetch_tenant_context(db: AsyncSession, tenant_id: UUID) -> dict | None:
+async def add_extra_sites(db: AsyncSession, tenant_id: UUID, additional_sites: int) -> UUID:
     result = await db.execute(
-        text("select id, schema_name from public.tenants where id=:tenant_id and is_active=true"),
+        text(
+            """
+            update public.tenant_subscriptions
+            set extra_sites_count=extra_sites_count + :additional_sites,
+                updated_at=now()
+            where tenant_id=:tenant_id
+            returning id
+            """
+        ),
+        {'tenant_id': str(tenant_id), 'additional_sites': additional_sites},
+    )
+    updated = result.scalar_one_or_none()
+    if updated is not None:
+        return updated
+
+    created = await db.execute(
+        text(
+            """
+            insert into public.tenant_subscriptions (
+              tenant_id,
+              plan_name,
+              start_date,
+              end_date,
+              is_active,
+              extra_sites_count,
+              trial_start_date,
+              trial_end_date,
+              is_trial_active
+            )
+            values (
+              :tenant_id,
+              null,
+              null,
+              null,
+              false,
+              :additional_sites,
+              current_date,
+              current_date,
+              false
+            )
+            returning id
+            """
+        ),
+        {'tenant_id': str(tenant_id), 'additional_sites': additional_sites},
+    )
+    return created.scalar_one()
+
+
+async def fetch_subscription_context(db: AsyncSession, tenant_id: UUID) -> dict | None:
+    result = await db.execute(
+        text(
+            """
+            select
+              ts.id,
+              ts.tenant_id,
+              ts.plan_name,
+              ts.start_date,
+              ts.end_date,
+              ts.is_active,
+              ts.extra_sites_count,
+              ts.trial_start_date,
+              ts.trial_end_date,
+              ts.is_trial_active,
+              p.max_sites,
+              p.price_usd_monthly
+            from public.tenant_subscriptions ts
+            left join public.plans p on p.name = ts.plan_name and p.is_active=true
+            where ts.tenant_id=:tenant_id
+            """
+        ),
         {'tenant_id': str(tenant_id)},
     )
     row = result.mappings().one_or_none()
     return dict(row) if row else None
 
 
-async def is_subscription_valid(db: AsyncSession, tenant_id: UUID) -> bool:
+async def plan_exists(db: AsyncSession, plan_name: str) -> bool:
     result = await db.execute(
-        text('select public.is_tenant_subscription_valid(:tenant_id)'),
-        {'tenant_id': str(tenant_id)},
+        text("select exists(select 1 from public.plans where name=:name and is_active=true)"),
+        {'name': plan_name},
     )
     return bool(result.scalar_one())
+
+
+async def list_plans(db: AsyncSession) -> list[dict]:
+    result = await db.execute(
+        text(
+            """
+            select name, price_usd_monthly, max_sites
+            from public.plans
+            where is_active=true
+            order by price_usd_monthly
+            """
+        )
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def fetch_tenant_context(db: AsyncSession, tenant_id: UUID) -> dict | None:
+    result = await db.execute(
+        text('select id, schema_name from public.tenants where id=:tenant_id and is_active=true'),
+        {'tenant_id': str(tenant_id)},
+    )
+    row = result.mappings().one_or_none()
+    return dict(row) if row else None

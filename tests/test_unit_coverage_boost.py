@@ -1,7 +1,7 @@
 import asyncio
 import runpy
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -33,7 +33,7 @@ from app.api.v1.schemas import (
 )
 from app.core import exceptions as core_exceptions
 from app.core.logging import configure_logging, get_logger
-from app.models.enums import BillingCycle, SiteStatus, SubscriptionStatus, TaskStatus
+from app.models.enums import SiteStatus, TaskStatus
 from app.repositories import dashboard as dashboard_repo
 from app.repositories import expenses as expenses_repo
 from app.repositories import materials as materials_repo
@@ -301,17 +301,6 @@ def test_tenants_repository_paths() -> None:
     db.execute = AsyncMock(return_value=tenant_row)
     assert _run(tenants_repo.insert_tenant(db, "ACME", "t_acme")) == {"id": "t1", "name": "ACME", "schema_name": "t_acme"}
 
-    scalar_none = MagicMock()
-    scalar_none.scalar_one_or_none.return_value = None
-    db.execute = AsyncMock(return_value=scalar_none)
-    assert _run(tenants_repo.fetch_active_core_plan_id(db)) is None
-
-    scalar_plan = MagicMock()
-    plan_id = uuid4()
-    scalar_plan.scalar_one_or_none.return_value = plan_id
-    db.execute = AsyncMock(return_value=scalar_plan)
-    assert _run(tenants_repo.fetch_active_core_plan_id(db)) == plan_id
-
     mapping_none = MagicMock()
     mapping_none.mappings.return_value.one_or_none.return_value = None
     db.execute = AsyncMock(return_value=mapping_none)
@@ -322,31 +311,32 @@ def test_tenants_repository_paths() -> None:
     db.execute = AsyncMock(return_value=mapping_row)
     assert _run(tenants_repo.fetch_tenant_context(db, uuid4())) == {"id": "x", "schema_name": "t_x"}
 
-    valid_result = MagicMock()
-    valid_result.scalar_one.return_value = 0
-    db.execute = AsyncMock(return_value=valid_result)
-    assert _run(tenants_repo.is_subscription_valid(db, uuid4())) is False
+    scalar_bool = MagicMock()
+    scalar_bool.scalar_one.return_value = True
+    db.execute = AsyncMock(return_value=scalar_bool)
+    assert _run(tenants_repo.plan_exists(db, "STARTER")) is True
 
-    db.execute = AsyncMock()
-    _run(tenants_repo.insert_default_active_subscription(db, uuid4(), uuid4(), BillingCycle.YEARLY))
-    assert "1 year" in str(db.execute.call_args.args[0])
+    plans_rows = MagicMock()
+    plans_rows.mappings.return_value.all.return_value = [{"name": "STARTER", "price_usd_monthly": 10, "max_sites": 3}]
+    db.execute = AsyncMock(return_value=plans_rows)
+    assert len(_run(tenants_repo.list_plans(db))) == 1
 
-    scalar_sub = MagicMock()
+    scalar_trial = MagicMock()
+    trial_id = uuid4()
+    scalar_trial.scalar_one.return_value = trial_id
+    db.execute = AsyncMock(return_value=scalar_trial)
+    assert _run(tenants_repo.create_trial_subscription(db, uuid4(), 45)) == trial_id
+
+    scalar_upsert = MagicMock()
     sub_id = uuid4()
-    scalar_sub.scalar_one.return_value = sub_id
-    db.execute = AsyncMock(return_value=scalar_sub)
-    assert _run(
-        tenants_repo.insert_subscription(
-            db,
-            uuid4(),
-            uuid4(),
-            BillingCycle.MONTHLY,
-            SubscriptionStatus.ACTIVE,
-            datetime.now(timezone.utc),
-            datetime.now(timezone.utc),
-            None,
-        )
-    ) == sub_id
+    scalar_upsert.scalar_one.return_value = sub_id
+    db.execute = AsyncMock(return_value=scalar_upsert)
+    assert _run(tenants_repo.upsert_subscription(db, uuid4(), "STARTER", date.today(), date.today(), True, 0)) == sub_id
+
+    mapping_sub = MagicMock()
+    mapping_sub.mappings.return_value.one_or_none.return_value = {"tenant_id": uuid4(), "plan_name": "STARTER"}
+    db.execute = AsyncMock(return_value=mapping_sub)
+    assert _run(tenants_repo.fetch_subscription_context(db, uuid4()))["plan_name"] == "STARTER"
 
 
 def test_services_projects_sites_tasks_dashboard(monkeypatch) -> None:
@@ -477,20 +467,34 @@ def test_services_project_site_task_not_found_paths(monkeypatch) -> None:
 
 def test_tenants_service_error_paths(monkeypatch) -> None:
     db = MagicMock()
-    payload = TenantCreateRequest(name="Tenant", schema_name="tenant_schema", billing_cycle=BillingCycle.MONTHLY)
-    monkeypatch.setattr(tenants_service.repo, "fetch_active_core_plan_id", AsyncMock(return_value=None))
+    payload = TenantCreateRequest(name="Tenant", schema_name="tenant_schema")
+    monkeypatch.setattr(tenants_service, "validate_schema_name", lambda v: v)
+    monkeypatch.setattr(tenants_service.repo, "insert_tenant", AsyncMock(return_value={"id": uuid4(), "name": "Tenant", "schema_name": "tenant_schema"}))
+    monkeypatch.setattr(tenants_service, "tenant_schema_statements", lambda _s: [])
+    monkeypatch.setattr(tenants_service.repo, "create_trial_subscription", AsyncMock())
+    out = _run(tenants_service.create_tenant(db, payload))
+    assert out["schema_name"] == "tenant_schema"
+
+    bad_sub_payload = SubscriptionCreateRequest(
+        tenant_id=uuid4(),
+        plan_name='STARTER',
+        start_date=date.today() + timedelta(days=2),
+        end_date=date.today() + timedelta(days=1),
+        is_active=True,
+        extra_sites_count=0,
+    )
     with pytest.raises(HTTPException):
-        _run(tenants_service.create_tenant(db, payload))
+        _run(tenants_service.create_subscription(db, bad_sub_payload))
 
     sub_payload = SubscriptionCreateRequest(
         tenant_id=uuid4(),
-        billing_cycle=BillingCycle.MONTHLY,
-        status=SubscriptionStatus.ACTIVE,
-        period_start=datetime.now(timezone.utc),
-        period_end=datetime.now(timezone.utc),
-        trial_end=None,
+        plan_name='STARTER',
+        start_date=date.today(),
+        end_date=date.today() + timedelta(days=10),
+        is_active=True,
+        extra_sites_count=0,
     )
-    monkeypatch.setattr(tenants_service.repo, "fetch_active_core_plan_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(tenants_service.repo, "plan_exists", AsyncMock(return_value=False))
     with pytest.raises(HTTPException):
         _run(tenants_service.create_subscription(db, sub_payload))
 
@@ -499,7 +503,18 @@ def test_tenants_service_error_paths(monkeypatch) -> None:
         _run(tenants_service.get_tenant_context(db, uuid4()))
 
     tenant_ctx = TenantContext(tenant_id=uuid4(), schema_name="t1")
-    monkeypatch.setattr(tenants_service.repo, "is_subscription_valid", AsyncMock(return_value=False))
+    monkeypatch.setattr(tenants_service.repo, "fetch_subscription_context", AsyncMock(return_value={
+        "tenant_id": tenant_ctx.tenant_id,
+        "is_trial_active": False,
+        "trial_start_date": date.today() - timedelta(days=10),
+        "trial_end_date": date.today() - timedelta(days=5),
+        "is_active": False,
+        "plan_name": None,
+        "start_date": None,
+        "end_date": None,
+        "extra_sites_count": 0,
+        "max_sites": None,
+    }))
     with pytest.raises(HTTPException):
         _run(tenants_service.require_active_subscription(db, tenant_ctx))
 
@@ -510,25 +525,24 @@ def test_tenants_service_create_tenant_success(monkeypatch) -> None:
     tenant_id = uuid4()
 
     monkeypatch.setattr(tenants_service, "validate_schema_name", lambda v: v)
-    monkeypatch.setattr(tenants_service.repo, "fetch_active_core_plan_id", AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(
         tenants_service.repo,
         "insert_tenant",
         AsyncMock(return_value={"id": tenant_id, "name": "ACME", "schema_name": "t_acme"}),
     )
     monkeypatch.setattr(tenants_service, "tenant_schema_statements", lambda _s: ["create schema x", "create table y"])
-    default_sub = AsyncMock()
-    monkeypatch.setattr(tenants_service.repo, "insert_default_active_subscription", default_sub)
+    trial_sub = AsyncMock()
+    monkeypatch.setattr(tenants_service.repo, "create_trial_subscription", trial_sub)
 
     out = _run(
         tenants_service.create_tenant(
             db,
-            TenantCreateRequest(name="ACME", schema_name="t_acme", billing_cycle=BillingCycle.MONTHLY),
+            TenantCreateRequest(name="ACME", schema_name="t_acme"),
         )
     )
     assert out["tenant_id"] == tenant_id
     assert db.execute.await_count == 2
-    default_sub.assert_awaited_once()
+    trial_sub.assert_awaited_once()
 
 
 def test_services_expenses_materials_and_tenants_success(monkeypatch) -> None:
@@ -561,14 +575,15 @@ def test_services_expenses_materials_and_tenants_success(monkeypatch) -> None:
     assert _run(materials_service.materials_summary(db, tenant, uuid4())) == [{"name": "sand"}]
 
     tenant_id = uuid4()
-    monkeypatch.setattr(tenants_service.repo, "fetch_active_core_plan_id", AsyncMock(return_value=uuid4()))
-    monkeypatch.setattr(tenants_service.repo, "insert_subscription", AsyncMock(return_value=uid))
+    monkeypatch.setattr(tenants_service.repo, "plan_exists", AsyncMock(return_value=True))
+    monkeypatch.setattr(tenants_service.repo, "upsert_subscription", AsyncMock(return_value=uid))
     sub = SubscriptionCreateRequest(
         tenant_id=tenant_id,
-        billing_cycle=BillingCycle.MONTHLY,
-        status=SubscriptionStatus.ACTIVE,
-        period_start=datetime.now(timezone.utc),
-        period_end=datetime.now(timezone.utc),
+        plan_name="PRO",
+        start_date=date.today(),
+        end_date=date.today() + timedelta(days=30),
+        is_active=True,
+        extra_sites_count=1,
     )
     assert _run(tenants_service.create_subscription(MagicMock(), sub)) == uid
 
@@ -577,7 +592,18 @@ def test_services_expenses_materials_and_tenants_success(monkeypatch) -> None:
     assert tenant_ctx.schema_name == "t1"
 
     ctx = TenantContext(tenant_id=tenant_id, schema_name="t1")
-    monkeypatch.setattr(tenants_service.repo, "is_subscription_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(tenants_service.repo, "fetch_subscription_context", AsyncMock(return_value={
+        "tenant_id": tenant_id,
+        "is_trial_active": True,
+        "trial_start_date": date.today() - timedelta(days=1),
+        "trial_end_date": date.today() + timedelta(days=1),
+        "is_active": False,
+        "plan_name": None,
+        "start_date": None,
+        "end_date": None,
+        "extra_sites_count": 0,
+        "max_sites": None,
+    }))
     assert _run(tenants_service.require_active_subscription(MagicMock(), ctx)) == ctx
 
 
@@ -636,10 +662,11 @@ def test_api_endpoint_direct_returns(monkeypatch) -> None:
     monkeypatch.setattr(tenants_api, "create_subscription", AsyncMock(return_value=uid))
     sub_payload = SubscriptionCreateRequest(
         tenant_id=uuid4(),
-        billing_cycle=BillingCycle.MONTHLY,
-        status=SubscriptionStatus.ACTIVE,
-        period_start=datetime.now(timezone.utc),
-        period_end=datetime.now(timezone.utc),
+        plan_name='STARTER',
+        start_date=date.today(),
+        end_date=date.today(),
+        is_active=True,
+        extra_sites_count=0,
     )
     assert _run(tenants_api.create_subscription_endpoint(sub_payload, db)) == {"subscription_id": str(uid)}
     monkeypatch.setattr(tasks_api, "delete_task", AsyncMock(return_value=None))

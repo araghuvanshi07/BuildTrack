@@ -23,6 +23,11 @@ async def list_sites(db: AsyncSession) -> list[dict]:
     return [dict(row) for row in result.mappings().all()]
 
 
+async def count_sites(db: AsyncSession) -> int:
+    result = await db.execute(text('select count(*) from sites where is_deleted=false'))
+    return int(result.scalar_one())
+
+
 async def get_site(db: AsyncSession, site_id: UUID) -> dict | None:
     result = await db.execute(text('select * from sites where id=:id and is_deleted=false'), {'id': str(site_id)})
     row = result.mappings().one_or_none()

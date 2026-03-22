@@ -1,23 +1,22 @@
-# BuildTrack DB - Flat Subscription Model
+# Subscription Schema (v2)
 
-## What this migration includes
-- Flat contractor subscription (monthly/yearly)
-- Unlimited sites (no site-based billing limit table/logic)
-- Optional add-ons (WhatsApp alerts, PDF exports, advanced reports)
-- Billing support tables (subscriptions, invoices, payments)
-- Helper function for backend gate checks:
-  - `public.is_tenant_subscription_valid(tenant_id uuid)`
+This folder contains SQL for the multi-tenant subscription model used by BuildTrack.
 
-## Apply on local Postgres
+## Features
+- Fixed plans: `STARTER`, `GROWTH`, `PRO`
+- Trial on tenant creation: 45 days with trial flags
+- Extra site tracking via `extra_sites_count`
+- Single subscription record per tenant
+
+## Run
 ```bash
 psql -d <your_db_name> -f db/001_subscription_flat_model.sql
 ```
 
-## Basic backend check query
-```sql
-select public.is_tenant_subscription_valid('<tenant_uuid>'::uuid);
-```
+## Tables
+- `public.plans`
+- `public.tenant_subscriptions`
 
-## API gating logic
-- If helper function returns `true`: allow protected write/read APIs.
-- If `false`: return payment/subscription error response.
+## Notes
+- v1 billing objects are dropped during migration (`tenant_add_ons`, old `tenant_subscriptions`, old function).
+- Access and site-limit logic is enforced in application services/dependencies.

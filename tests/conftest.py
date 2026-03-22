@@ -70,7 +70,6 @@ def tenant_headers(client: TestClient) -> dict[str, str]:
         json={
             "name": f"Contractor-{uuid4().hex[:6]}",
             "schema_name": schema_name,
-            "billing_cycle": "MONTHLY",
         },
     )
     assert response.status_code == 200
@@ -88,10 +87,14 @@ def expire_subscription() -> callable:
                         text(
                             """
                             update public.tenant_subscriptions
-                            set status='EXPIRED',
-                                period_start=now() - interval '2 day',
-                                period_end=now() - interval '1 day'
-                            where tenant_id=:tenant_id and status in ('TRIALING','ACTIVE','PAST_DUE')
+                            set is_trial_active=false,
+                                trial_start_date=current_date - 60,
+                                trial_end_date=current_date - 1,
+                                is_active=false,
+                                start_date=current_date - 60,
+                                end_date=current_date - 1,
+                                updated_at=now()
+                            where tenant_id=:tenant_id
                             """
                         ),
                         {"tenant_id": tenant_id},

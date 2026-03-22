@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.enums import BillingCycle, SiteStatus, SubscriptionStatus, TaskStatus, UserRole
+from app.models.enums import AttendanceStatus, PlanName, SalaryType, SiteStatus, TaskStatus, UserRole
 
 
 class TenantContext(BaseModel):
@@ -53,7 +53,6 @@ class ResendSetPasswordLinkRequest(BaseModel):
 class TenantCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=140)
     schema_name: str = Field(min_length=3, max_length=63)
-    billing_cycle: BillingCycle = BillingCycle.MONTHLY
 
 
 class TenantCreateResponse(BaseModel):
@@ -64,11 +63,16 @@ class TenantCreateResponse(BaseModel):
 
 class SubscriptionCreateRequest(BaseModel):
     tenant_id: UUID
-    billing_cycle: BillingCycle = BillingCycle.MONTHLY
-    status: SubscriptionStatus = SubscriptionStatus.ACTIVE
-    period_start: datetime
-    period_end: datetime
-    trial_end: datetime | None = None
+    plan_name: PlanName
+    start_date: date
+    end_date: date
+    is_active: bool = True
+    extra_sites_count: int = Field(default=0, ge=0)
+
+
+class AddExtraSitesRequest(BaseModel):
+    tenant_id: UUID
+    additional_sites: int = Field(ge=1)
 
 
 class ProjectCreateRequest(BaseModel):
@@ -170,4 +174,55 @@ class AssignSupervisorSiteRequest(BaseModel):
 class WorkerCreateRequest(BaseModel):
     site_id: UUID
     name: str = Field(min_length=2, max_length=120)
+    salary_type: SalaryType
+    daily_wage: Decimal | None = Field(default=None, ge=0)
+    monthly_salary: Decimal | None = Field(default=None, ge=0)
+    is_attendance_based: bool = True
     phone: str | None = Field(default=None, min_length=8, max_length=20)
+
+    @model_validator(mode='after')
+    def validate_salary_shape(self):
+        if self.salary_type == SalaryType.DAILY:
+            if self.daily_wage is None:
+                raise ValueError('daily_wage is required when salary_type is daily')
+            if self.monthly_salary is not None:
+                raise ValueError('monthly_salary must be null when salary_type is daily')
+            self.is_attendance_based = True
+        if self.salary_type == SalaryType.MONTHLY:
+            if self.monthly_salary is None:
+                raise ValueError('monthly_salary is required when salary_type is monthly')
+            if self.daily_wage is not None:
+                raise ValueError('daily_wage must be null when salary_type is monthly')
+        return self
+
+
+class AttendanceCreateRequest(BaseModel):
+    worker_id: UUID
+    site_id: UUID
+    date: date
+    status: AttendanceStatus
+
+
+class BonusCreateRequest(BaseModel):
+    worker_id: UUID
+    amount: Decimal = Field(ge=0)
+    date: date
+    note: str | None = None
+
+
+class SalarySettlementUpsertRequest(BaseModel):
+    worker_id: UUID
+    from_date: date
+    to_date: date
+    is_paid: bool = True
+    paid_on: date | None = None
+
+    @model_validator(mode='after')
+    def validate_period(self):
+        if self.to_date < self.from_date:
+            raise ValueError('to_date must be on or after from_date')
+        if self.is_paid and self.paid_on is None:
+            self.paid_on = date.today()
+        if not self.is_paid:
+            self.paid_on = None
+        return self

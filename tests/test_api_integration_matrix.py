@@ -1,7 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+
+RAZORPAY_HEADERS = {'X-Razorpay-Webhook-Secret': 'razorpay_test_secret'}
 
 
 def _create_project(client: TestClient, headers: dict[str, str], name: str = 'Project X') -> str:
@@ -57,7 +59,7 @@ def test_auth_refresh_without_subject_uses_default(client: TestClient) -> None:
 def test_tenant_create_invalid_schema_name(client: TestClient) -> None:
     response = client.post(
         '/api/v1/tenants',
-        json={'name': 'Bad Schema Tenant', 'schema_name': 'Invalid-Schema', 'billing_cycle': 'MONTHLY'},
+        json={'name': 'Bad Schema Tenant', 'schema_name': 'Invalid-Schema'},
     )
     assert response.status_code == 400
 
@@ -65,50 +67,65 @@ def test_tenant_create_invalid_schema_name(client: TestClient) -> None:
 def test_tenant_subscription_create_success(client: TestClient) -> None:
     tenant_resp = client.post(
         '/api/v1/tenants',
-        json={'name': 'Subscription Tenant', 'schema_name': f'tsub{uuid4().hex[:8]}', 'billing_cycle': 'MONTHLY'},
+        json={'name': 'Subscription Tenant', 'schema_name': f'tsub{uuid4().hex[:8]}'},
     )
     assert tenant_resp.status_code == 200
     tenant_id = tenant_resp.json()['tenant_id']
 
-    start = datetime.now(timezone.utc) - timedelta(days=60)
-    end = datetime.now(timezone.utc) - timedelta(days=30)
+    start = date.today()
+    end = date.today() + timedelta(days=30)
     response = client.post(
         '/api/v1/tenants/subscription',
+        headers=RAZORPAY_HEADERS,
         json={
             'tenant_id': tenant_id,
-            'billing_cycle': 'MONTHLY',
-            'status': 'EXPIRED',
-            'period_start': start.isoformat(),
-            'period_end': end.isoformat(),
-            'trial_end': None,
+            'plan_name': 'STARTER',
+            'start_date': start.isoformat(),
+            'end_date': end.isoformat(),
+            'is_active': True,
+            'extra_sites_count': 0,
         },
     )
     assert response.status_code == 200
     assert 'subscription_id' in response.json()
 
 
-def test_tenant_subscription_duplicate_live_conflict(client: TestClient) -> None:
+def test_tenant_subscription_upsert_is_allowed(client: TestClient) -> None:
     tenant_resp = client.post(
         '/api/v1/tenants',
-        json={'name': 'Duplicate Sub Tenant', 'schema_name': f'tsubdup{uuid4().hex[:8]}', 'billing_cycle': 'MONTHLY'},
+        json={'name': 'Duplicate Sub Tenant', 'schema_name': f'tsubdup{uuid4().hex[:8]}'},
     )
     assert tenant_resp.status_code == 200
     tenant_id = tenant_resp.json()['tenant_id']
 
-    now = datetime.now(timezone.utc)
+    now = date.today()
     future = now + timedelta(days=30)
-    response = client.post(
+    first = client.post(
         '/api/v1/tenants/subscription',
+        headers=RAZORPAY_HEADERS,
         json={
             'tenant_id': tenant_id,
-            'billing_cycle': 'MONTHLY',
-            'status': 'ACTIVE',
-            'period_start': now.isoformat(),
-            'period_end': future.isoformat(),
-            'trial_end': None,
+            'plan_name': 'STARTER',
+            'start_date': now.isoformat(),
+            'end_date': future.isoformat(),
+            'is_active': True,
+            'extra_sites_count': 0,
         },
     )
-    assert response.status_code == 409
+    assert first.status_code == 200
+    second = client.post(
+        '/api/v1/tenants/subscription',
+        headers=RAZORPAY_HEADERS,
+        json={
+            'tenant_id': tenant_id,
+            'plan_name': 'PRO',
+            'start_date': now.isoformat(),
+            'end_date': future.isoformat(),
+            'is_active': True,
+            'extra_sites_count': 2,
+        },
+    )
+    assert second.status_code == 200
 
 
 def test_contractor_supervisor_list_and_detail(client: TestClient, tenant_headers: dict[str, str]) -> None:
@@ -341,9 +358,11 @@ def test_unknown_tenant_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_inactive_subscription_returns_402(client: TestClient, tenant_headers: dict[str, str], expire_subscription) -> None:
+def test_inactive_subscription_is_read_only(client: TestClient, tenant_headers: dict[str, str], expire_subscription) -> None:
     _create_project(client, tenant_headers, 'Subscription Block Project')
     expire_subscription(tenant_headers['X-Tenant-ID'])
 
-    response = client.get('/api/v1/projects', headers=tenant_headers)
-    assert response.status_code == 402
+    get_response = client.get('/api/v1/projects', headers=tenant_headers)
+    assert get_response.status_code == 200
+    write_response = client.post('/api/v1/projects', headers=tenant_headers, json={'name': 'Blocked Project'})
+    assert write_response.status_code == 402

@@ -106,8 +106,12 @@ async def create_worker(db: AsyncSession, payload: dict) -> UUID:
     result = await db.execute(
         text(
             """
-            insert into workers (site_id, name, phone, created_by)
-            values (:site_id, :name, :phone, :created_by)
+            insert into workers (
+              site_id, name, salary_type, daily_wage, monthly_salary, is_attendance_based, phone, created_by
+            )
+            values (
+              :site_id, :name, :salary_type, :daily_wage, :monthly_salary, :is_attendance_based, :phone, :created_by
+            )
             returning id
             """
         ),

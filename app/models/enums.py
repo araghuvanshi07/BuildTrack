@@ -35,3 +35,21 @@ class TaskStatus(str, Enum):
     PENDING = 'pending'
     IN_PROGRESS = 'in_progress'
     COMPLETED = 'completed'
+
+
+class SalaryType(str, Enum):
+    DAILY = 'daily'
+    MONTHLY = 'monthly'
+
+
+class AttendanceStatus(str, Enum):
+    PRESENT = 'present'
+    ABSENT = 'absent'
+    PAID_LEAVE = 'paid_leave'
+    HALF_DAY = 'half_day'
+
+
+class PlanName(str, Enum):
+    STARTER = 'STARTER'
+    GROWTH = 'GROWTH'
+    PRO = 'PRO'

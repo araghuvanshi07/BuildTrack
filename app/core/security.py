@@ -1,13 +1,21 @@
+import base64
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from jose import jwt
-from passlib.context import CryptContext
 
 from app.core.config import get_settings
 
 
 settings = get_settings()
-pwd_context = CryptContext(schemes=['pbkdf2_sha256'], deprecated='auto')
+_PBKDF2_SCHEME = 'pbkdf2-sha256'
+_PBKDF2_ROUNDS = 29000
+
+
+def _b64decode_nopad(value: str) -> bytes:
+    return base64.b64decode(value + ('=' * (-len(value) % 4)))
 
 
 def create_access_token(subject: str, claims: dict | None = None) -> str:
@@ -37,8 +45,20 @@ def decode_token(token: str) -> dict:
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    salt = base64.b64encode(secrets.token_bytes(16)).decode().rstrip('=')
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), _b64decode_nopad(salt), _PBKDF2_ROUNDS)
+    checksum = base64.b64encode(dk).decode().rstrip('=')
+    return f'${_PBKDF2_SCHEME}${_PBKDF2_ROUNDS}${salt}${checksum}'
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    return pwd_context.verify(password, password_hash)
+    try:
+        _, scheme, rounds_text, salt_b64, expected_checksum = password_hash.split('$', 4)
+        if scheme != _PBKDF2_SCHEME:
+            return False
+        rounds = int(rounds_text)
+        dk = hashlib.pbkdf2_hmac('sha256', password.encode(), _b64decode_nopad(salt_b64), rounds)
+        actual_checksum = base64.b64encode(dk).decode().rstrip('=')
+        return hmac.compare_digest(expected_checksum, actual_checksum)
+    except Exception:
+        return False

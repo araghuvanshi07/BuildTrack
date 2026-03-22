@@ -2,9 +2,9 @@ from datetime import date, datetime
 from decimal import Decimal
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -114,3 +114,81 @@ class Expense(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('1'))
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+
+
+class Worker(Base):
+    __tablename__ = 'workers'
+    __table_args__ = (
+        CheckConstraint(
+            "(salary_type='daily' and daily_wage is not null and monthly_salary is null) "
+            "or (salary_type='monthly' and monthly_salary is not null and daily_wage is null)",
+            name='worker_salary_type_check',
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text('gen_random_uuid()'))
+    site_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('sites.id'), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    salary_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    daily_wage: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    monthly_salary: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    is_attendance_based: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
+    phone: Mapped[str | None] = mapped_column(String(20))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('1'))
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+
+    attendances: Mapped[list['Attendance']] = relationship(back_populates='worker')
+    bonuses: Mapped[list['Bonus']] = relationship(back_populates='worker')
+    settlements: Mapped[list['SalarySettlement']] = relationship(back_populates='worker')
+
+
+class Attendance(Base):
+    __tablename__ = 'attendance'
+    __table_args__ = (
+        UniqueConstraint('worker_id', 'date', name='uq_attendance_worker_date'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text('gen_random_uuid()'))
+    worker_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('workers.id'), nullable=False)
+    site_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('sites.id'), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    marked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+
+    worker: Mapped['Worker'] = relationship(back_populates='attendances')
+
+
+class Bonus(Base):
+    __tablename__ = 'bonuses'
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text('gen_random_uuid()'))
+    worker_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('workers.id'), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+
+    worker: Mapped['Worker'] = relationship(back_populates='bonuses')
+
+
+class SalarySettlement(Base):
+    __tablename__ = 'salary_settlements'
+    __table_args__ = (
+        UniqueConstraint('worker_id', 'from_date', 'to_date', name='uq_salary_settlement_worker_period'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text('gen_random_uuid()'))
+    worker_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('workers.id'), nullable=False)
+    from_date: Mapped[date] = mapped_column(Date, nullable=False)
+    to_date: Mapped[date] = mapped_column(Date, nullable=False)
+    is_paid: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    paid_on: Mapped[date | None] = mapped_column(Date)
+    marked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+
+    worker: Mapped['Worker'] = relationship(back_populates='settlements')

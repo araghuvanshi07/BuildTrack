@@ -107,7 +107,7 @@ async def require_permission(
 async def create_worker(db: AsyncSession, actor: UserContext, payload: WorkerCreateRequest) -> UUID:
     await require_permission(db, actor, 'add_worker', payload.site_id)
     await set_tenant_search_path(db, actor.schema_name)
-    body = to_db_payload(payload, uuid_fields={'site_id'})
+    body = to_db_payload(payload, uuid_fields={'site_id'}, enum_fields={'salary_type'})
     body['created_by'] = str(actor.user_id) if actor.user_id else None
     return await repo.create_worker(db, body)
 

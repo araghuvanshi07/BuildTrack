@@ -1,6 +1,7 @@
+import hmac
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.schemas import TenantContext, UserContext, UserRole
@@ -8,7 +9,7 @@ from app.core.config import get_settings
 from app.core.security import decode_token
 from app.db.session import get_db
 from app.services.access_control_service import get_user_context
-from app.services.tenants_service import get_tenant_context, require_active_subscription
+from app.services.tenants_service import check_subscription_access, get_tenant_context
 
 
 async def get_current_tenant(
@@ -28,10 +29,11 @@ async def get_current_tenant(
 
 
 async def get_current_paid_tenant(
+    request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> TenantContext:
-    return await require_active_subscription(db, tenant)
+    return await check_subscription_access(db, tenant, request.method)
 
 
 async def get_current_user(
@@ -69,3 +71,11 @@ async def get_current_user(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail='Invalid user UUID header') from exc
     return await get_user_context(db, base, user_id)
+
+
+async def verify_razorpay_webhook(
+    x_razorpay_webhook_secret: str | None = Header(default=None, alias='X-Razorpay-Webhook-Secret'),
+) -> None:
+    settings = get_settings()
+    if not x_razorpay_webhook_secret or not hmac.compare_digest(x_razorpay_webhook_secret, settings.razorpay_webhook_secret):
+        raise HTTPException(status_code=401, detail='Invalid Razorpay webhook secret')

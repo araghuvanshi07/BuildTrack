@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from_email: str = 'no-reply@buildtrack.local'
     smtp_use_tls: bool = False
+    razorpay_webhook_secret: str = 'razorpay_test_secret'
 
 
 @lru_cache

@@ -10,13 +10,16 @@ PUBLIC_STATEMENTS = [
       updated_at timestamptz not null default now()
     )
     """,
+    "drop function if exists public.is_tenant_subscription_valid(uuid)",
+    "drop table if exists public.tenant_add_ons cascade",
+    "drop table if exists public.tenant_subscriptions cascade",
+    "drop table if exists public.plans cascade",
     """
     create table if not exists public.plans (
       id uuid primary key default gen_random_uuid(),
-      code varchar(50) not null unique,
-      name varchar(120) not null,
-      monthly_price_inr numeric(12,2) not null check (monthly_price_inr >= 0),
-      yearly_price_inr numeric(12,2) not null check (yearly_price_inr >= 0),
+      name varchar(20) not null unique check (name in ('STARTER', 'GROWTH', 'PRO')),
+      price_usd_monthly numeric(10,2) not null check (price_usd_monthly >= 0),
+      max_sites int not null check (max_sites >= 1),
       is_active boolean not null default true,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
@@ -25,62 +28,28 @@ PUBLIC_STATEMENTS = [
     """
     create table if not exists public.tenant_subscriptions (
       id uuid primary key default gen_random_uuid(),
-      tenant_id uuid not null references public.tenants(id) on delete cascade,
-      plan_id uuid not null references public.plans(id),
-      billing_cycle varchar(10) not null check (billing_cycle in ('MONTHLY','YEARLY')),
-      status varchar(20) not null check (status in ('TRIALING','ACTIVE','PAST_DUE','CANCELED','EXPIRED')),
-      period_start timestamptz not null,
-      period_end timestamptz not null,
-      trial_end timestamptz,
-      cancel_at_period_end boolean not null default false,
+      tenant_id uuid not null unique references public.tenants(id) on delete cascade,
+      plan_name varchar(20) references public.plans(name),
+      start_date date,
+      end_date date,
+      is_active boolean not null default false,
+      extra_sites_count int not null default 0 check (extra_sites_count >= 0),
+      trial_start_date date not null,
+      trial_end_date date not null,
+      is_trial_active boolean not null default true,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now(),
-      check (period_end > period_start)
+      check (trial_end_date >= trial_start_date)
     )
     """,
+    "create index if not exists idx_tenant_subscriptions_tenant on public.tenant_subscriptions(tenant_id)",
     """
-    create unique index if not exists uq_tenant_single_live_subscription
-    on public.tenant_subscriptions (tenant_id)
-    where status in ('TRIALING','ACTIVE','PAST_DUE')
-    """,
-    """
-    create table if not exists public.tenant_add_ons (
-      id uuid primary key default gen_random_uuid(),
-      tenant_subscription_id uuid not null references public.tenant_subscriptions(id) on delete cascade,
-      add_on_code varchar(60) not null,
-      add_on_name varchar(120) not null,
-      price_inr numeric(12,2) not null check (price_inr >= 0),
-      billing_cycle varchar(10) not null check (billing_cycle in ('MONTHLY','YEARLY')),
-      status varchar(20) not null check (status in ('ACTIVE','CANCELED')),
-      period_start timestamptz not null,
-      period_end timestamptz not null,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(),
-      check (period_end > period_start)
-    )
-    """,
-    """
-    create or replace function public.is_tenant_subscription_valid(p_tenant_id uuid)
-    returns boolean
-    language sql
-    stable
-    as $$
-      select exists (
-        select 1
-        from public.tenant_subscriptions ts
-        where ts.tenant_id = p_tenant_id
-          and ts.period_end >= now()
-          and (
-            ts.status = 'ACTIVE'
-            or (ts.status = 'TRIALING' and (ts.trial_end is null or ts.trial_end >= now()))
-          )
-      );
-    $$
-    """,
-    """
-    insert into public.plans (code, name, monthly_price_inr, yearly_price_inr)
-    values ('buildtrack_core', 'BuildTrack Core', 1999.00, 19999.00)
-    on conflict (code) do nothing
+    insert into public.plans (name, price_usd_monthly, max_sites)
+    values ('STARTER', 10.00, 3), ('GROWTH', 20.00, 5), ('PRO', 40.00, 10)
+    on conflict (name) do update
+    set price_usd_monthly=excluded.price_usd_monthly,
+        max_sites=excluded.max_sites,
+        updated_at=now()
     """,
 ]
 
@@ -219,12 +188,58 @@ def tenant_schema_statements(schema_name: str) -> list[str]:
           id uuid primary key default gen_random_uuid(),
           site_id uuid not null references {schema_name}.sites(id),
           name varchar(120) not null,
+          salary_type varchar(20) not null check (salary_type in ('daily','monthly')),
+          daily_wage numeric(12,2),
+          monthly_salary numeric(12,2),
+          is_attendance_based boolean not null default true,
           phone varchar(20),
           created_by uuid,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now(),
           version bigint not null default 1,
-          is_deleted boolean not null default false
+          is_deleted boolean not null default false,
+          check (
+            (salary_type='daily' and daily_wage is not null and monthly_salary is null)
+            or (salary_type='monthly' and monthly_salary is not null and daily_wage is null)
+          )
+        )
+        """,
+        f"""
+        create table if not exists {schema_name}.attendance (
+          id uuid primary key default gen_random_uuid(),
+          worker_id uuid not null references {schema_name}.workers(id) on delete cascade,
+          site_id uuid not null references {schema_name}.sites(id) on delete cascade,
+          date date not null,
+          status varchar(20) not null check (status in ('present','absent','paid_leave','half_day')),
+          marked_by uuid,
+          created_at timestamptz not null default now(),
+          unique (worker_id, date)
+        )
+        """,
+        f"""
+        create table if not exists {schema_name}.bonuses (
+          id uuid primary key default gen_random_uuid(),
+          worker_id uuid not null references {schema_name}.workers(id) on delete cascade,
+          amount numeric(12,2) not null check (amount >= 0),
+          date date not null,
+          note text,
+          created_at timestamptz not null default now()
+        )
+        """,
+        f"drop table if exists {schema_name}.payments cascade",
+        f"""
+        create table if not exists {schema_name}.salary_settlements (
+          id uuid primary key default gen_random_uuid(),
+          worker_id uuid not null references {schema_name}.workers(id) on delete cascade,
+          from_date date not null,
+          to_date date not null,
+          is_paid boolean not null default false,
+          paid_on date,
+          marked_by uuid,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          unique (worker_id, from_date, to_date),
+          check (to_date >= from_date)
         )
         """,
         f"create index if not exists idx_sites_project on {schema_name}.sites(project_id)",
@@ -234,4 +249,8 @@ def tenant_schema_statements(schema_name: str) -> list[str]:
         f"create index if not exists idx_supervisor_permissions_supervisor on {schema_name}.supervisor_permissions(supervisor_id)",
         f"create index if not exists idx_supervisor_site_assignments_supervisor on {schema_name}.supervisor_site_assignments(supervisor_id)",
         f"create index if not exists idx_workers_site on {schema_name}.workers(site_id)",
+        f"create index if not exists idx_attendance_worker_date on {schema_name}.attendance(worker_id, date)",
+        f"create index if not exists idx_attendance_site_date on {schema_name}.attendance(site_id, date)",
+        f"create index if not exists idx_bonus_worker_date on {schema_name}.bonuses(worker_id, date)",
+        f"create index if not exists idx_settlement_worker_period on {schema_name}.salary_settlements(worker_id, from_date, to_date)",
     ]

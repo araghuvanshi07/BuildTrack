@@ -1,7 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+
+RAZORPAY_HEADERS = {'X-Razorpay-Webhook-Secret': 'razorpay_test_secret'}
 
 
 def _bootstrap_site_flow(client: TestClient, tenant_headers: dict[str, str]) -> tuple[str, str]:
@@ -52,23 +54,23 @@ def test_tenant_create_and_manual_subscription(client: TestClient) -> None:
         json={
             'name': 'Contractor Sub Test',
             'schema_name': f'tsubmanual{uuid4().hex[:8]}',
-            'billing_cycle': 'MONTHLY',
         },
     )
     assert tenant_resp.status_code == 200
     tenant_id = tenant_resp.json()['tenant_id']
 
-    period_start = datetime.now(timezone.utc) - timedelta(days=30)
-    period_end = datetime.now(timezone.utc) - timedelta(days=15)
+    start_date = date.today()
+    end_date = date.today() + timedelta(days=30)
     sub_resp = client.post(
         '/api/v1/tenants/subscription',
+        headers=RAZORPAY_HEADERS,
         json={
             'tenant_id': tenant_id,
-            'billing_cycle': 'MONTHLY',
-            'status': 'EXPIRED',
-            'period_start': period_start.isoformat(),
-            'period_end': period_end.isoformat(),
-            'trial_end': None,
+            'plan_name': 'GROWTH',
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+            'is_active': True,
+            'extra_sites_count': 1,
         },
     )
     assert sub_resp.status_code == 200
@@ -258,7 +260,7 @@ def test_invalid_tenant_uuid_header(client: TestClient) -> None:
     assert 'Invalid tenant UUID' in response.json()['detail']
 
 
-def test_inactive_subscription_blocks_access(
+def test_inactive_subscription_is_read_only(
     client: TestClient,
     tenant_headers: dict[str, str],
     expire_subscription,
@@ -271,5 +273,55 @@ def test_inactive_subscription_blocks_access(
     assert create.status_code == 200
 
     expire_subscription(tenant_headers['X-Tenant-ID'])
-    blocked = client.get('/api/v1/projects', headers=tenant_headers)
-    assert blocked.status_code == 402
+    allowed_read = client.get('/api/v1/projects', headers=tenant_headers)
+    assert allowed_read.status_code == 200
+
+    blocked_write = client.post('/api/v1/projects', headers=tenant_headers, json={'name': 'Blocked Project'})
+    assert blocked_write.status_code == 402
+
+
+def test_trial_site_limit_enforced(client: TestClient, tenant_headers: dict[str, str]) -> None:
+    project = client.post('/api/v1/projects', headers=tenant_headers, json={'name': 'Trial Limit Project'})
+    assert project.status_code == 200
+    project_id = project.json()['id']
+
+    first = client.post('/api/v1/sites', headers=tenant_headers, json={'project_id': project_id, 'status': 'active'})
+    second = client.post('/api/v1/sites', headers=tenant_headers, json={'project_id': project_id, 'status': 'active'})
+    third = client.post('/api/v1/sites', headers=tenant_headers, json={'project_id': project_id, 'status': 'active'})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 409
+
+
+def test_plan_and_extra_site_limit_enforced(client: TestClient) -> None:
+    schema_name = f"tplan{uuid4().hex[:8]}"
+    tenant_resp = client.post('/api/v1/tenants', json={'name': 'Plan Tenant', 'schema_name': schema_name})
+    assert tenant_resp.status_code == 200
+    tenant_id = tenant_resp.json()['tenant_id']
+    headers = {'X-Tenant-ID': tenant_id}
+
+    activate = client.post(
+        '/api/v1/tenants/subscription',
+        headers=RAZORPAY_HEADERS,
+        json={
+            'tenant_id': tenant_id,
+            'plan_name': 'STARTER',
+            'start_date': date.today().isoformat(),
+            'end_date': (date.today() + timedelta(days=30)).isoformat(),
+            'is_active': True,
+            'extra_sites_count': 1,
+        },
+    )
+    assert activate.status_code == 200
+
+    project = client.post('/api/v1/projects', headers=headers, json={'name': 'Plan Limit Project'})
+    assert project.status_code == 200
+    project_id = project.json()['id']
+
+    statuses = [
+        client.post('/api/v1/sites', headers=headers, json={'project_id': project_id, 'status': 'active'}).status_code
+        for _ in range(5)
+    ]
+    assert statuses[:4] == [200, 200, 200, 200]
+    assert statuses[4] == 409
